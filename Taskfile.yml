@@ -1,0 +1,30 @@
+version: '3'
+
+vars:
+  HOSTNAME:
+    sh: hostname
+
+tasks:
+  bird:setup:
+    desc: Set up BIRD (container + systemd unit; also the dedicated FIB + ip rule on r9600)
+    cmds:
+      - task: fib:setup
+        if: '{{eq .HOSTNAME "r9600"}}'
+      - sudo bird/scripts/bird-ctl.sh setup
+
+  bird:destroy:
+    desc: Tear down BIRD (systemd unit + container; also the dedicated FIB + ip rule on r9600)
+    cmds:
+      - sudo bird/scripts/bird-ctl.sh destroy
+      - task: fib:destroy
+        if: '{{eq .HOSTNAME "r9600"}}'
+
+  fib:setup:
+    desc: Set up the dedicated FIB (table 100/xdplab) + ip rule (r9600 only)
+    cmds:
+      - sudo bird/scripts/fib-ctl.sh setup
+
+  fib:destroy:
+    desc: Tear down the dedicated FIB (table 100/xdplab) + ip rule (r9600 only)
+    cmds:
+      - sudo bird/scripts/fib-ctl.sh destroy
