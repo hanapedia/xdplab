@@ -1,0 +1,27 @@
+[Unit]
+Description=BIRD BGP daemon (ghcr.io/cybozu/bird, containerized)
+Documentation=https://github.com/cybozu/neco-containers/tree/main/bird
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f bird-bgp
+ExecStartPre=-/usr/bin/docker pull ghcr.io/cybozu/bird:3.2.2
+ExecStart=/usr/bin/docker run --rm --name bird-bgp \
+  --network host \
+  --read-only \
+  --cap-drop ALL \
+  --cap-add NET_ADMIN \
+  --cap-add NET_BIND_SERVICE \
+  --cap-add NET_RAW \
+  --mount type=tmpfs,destination=/run/bird \
+  --mount type=bind,source=/etc/xdplab/bird/bird.conf,target=/etc/bird/bird.conf,readonly \
+  ghcr.io/cybozu/bird:3.2.2
+ExecStop=/usr/bin/docker stop -t 5 bird-bgp
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
