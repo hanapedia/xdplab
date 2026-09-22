@@ -176,7 +176,7 @@ docker run --rm --name bird-bgp \
 - `destroy`: removes the rule, flushes table `xdplab`, removes the name registration.
 - Run before `bird-ctl.sh setup` on `r9600` (the rule just needs to exist by the time BIRD's session converges and starts writing routes); tear down in the reverse order.
 
-**BGP session:** eBGP over the LAN. `r9600` and `r5500` share the `192.168.1.0/24` subnet but aren't each other's L2 next-hop — a router sits between them — so the session needs `multihop` (eBGP otherwise assumes a directly-connected peer, TTL 1) plus an explicit `source address` on each side, so the outgoing source IP is deterministic rather than left to the OS's routing-table pick. ASNs: `64512` (`r9600`), `64513` (`r5500`) — private range, arbitrary choice.
+**BGP session:** eBGP, directly connected — `r9600` and `r5500` are on the same L2 segment of `192.168.1.0/24`, so no `multihop` is needed; each side sets an explicit `source address` so the outgoing source IP is deterministic rather than left to the OS's routing-table pick. ASNs: `64512` (`r9600`), `64513` (`r5500`) — private range, arbitrary choice.
 
 ---
 
