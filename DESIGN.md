@@ -146,7 +146,7 @@ bird/
     └── fib-ctl.sh       # setup / destroy / status — r9600's dedicated table + rules
 ```
 
-**Image:** [`ghcr.io/cybozu/bird:3.2.2`](https://github.com/cybozu/neco-containers/tree/main/bird) — minimal multi-stage build of upstream BIRD 3.2.2. `kernel` and `direct` are core BIRD protocols (not part of the image's trimmed `--with-protocols` list), so both remain available. Entrypoint `bird -f` runs in the foreground, so systemd manages it as a plain `Type=simple` service with logs going straight to journald — no detached mode, no log shipping.
+**Image:** [`ghcr.io/cybozu/bird:3.2.2.1`](https://github.com/cybozu/neco-containers/tree/main/bird) — minimal multi-stage build of upstream BIRD 3.2.2. `kernel` and `direct` are core BIRD protocols (not part of the image's trimmed `--with-protocols` list), so both remain available. Entrypoint `bird -f` runs in the foreground, so systemd manages it as a plain `Type=simple` service with logs going straight to journald — no detached mode, no log shipping.
 
 **Container invocation** (full unit: [`bird/bird-bgp.service`](bird/bird-bgp.service)):
 ```
@@ -157,7 +157,7 @@ docker run --rm --name bird-bgp \
   --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE --cap-add NET_RAW \
   --mount type=tmpfs,destination=/run/bird \
   --mount type=bind,source=/etc/xdplab/bird/bird.conf,target=/etc/bird/bird.conf,readonly \
-  ghcr.io/cybozu/bird:3.2.2
+  ghcr.io/cybozu/bird:3.2.2.1
 ```
 - `--network host` — required, not just convenient: BIRD must see the host's real interfaces/routes (`protocol direct` on `r5500`) and write BGP-learned routes into the *host* kernel FIB on both ends.
 - `--read-only` + `--cap-drop ALL`, re-adding only `NET_ADMIN` (kernel FIB), `NET_RAW`/`NET_BIND_SERVICE` (BGP socket). `tmpfs` at `/run/bird` gives BIRD a writable spot for its control socket/PID file despite the read-only root.

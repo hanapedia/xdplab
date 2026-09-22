@@ -5,7 +5,7 @@
 # XDPLAB_HOST if a machine is renamed/reimaged.
 set -euo pipefail
 
-IMAGE="ghcr.io/cybozu/bird:3.2.2"
+IMAGE="ghcr.io/cybozu/bird:3.2.2.1"
 CONTAINER_NAME="bird-bgp"
 UNIT_NAME="bird-bgp.service"
 CONFIG_DIR="/etc/xdplab/bird"

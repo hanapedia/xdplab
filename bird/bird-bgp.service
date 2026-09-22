@@ -8,7 +8,7 @@ Requires=docker.service
 [Service]
 Type=simple
 ExecStartPre=-/usr/bin/docker rm -f bird-bgp
-ExecStartPre=-/usr/bin/docker pull ghcr.io/cybozu/bird:3.2.2
+ExecStartPre=-/usr/bin/docker pull ghcr.io/cybozu/bird:3.2.2.1
 ExecStart=/usr/bin/docker run --rm --name bird-bgp \
   --network host \
   --read-only \
@@ -18,7 +18,7 @@ ExecStart=/usr/bin/docker run --rm --name bird-bgp \
   --cap-add NET_RAW \
   --mount type=tmpfs,destination=/run/bird \
   --mount type=bind,source=/etc/xdplab/bird/bird.conf,target=/etc/bird/bird.conf,readonly \
-  ghcr.io/cybozu/bird:3.2.2
+  ghcr.io/cybozu/bird:3.2.2.1
 ExecStop=/usr/bin/docker stop -t 5 bird-bgp
 Restart=on-failure
 RestartSec=5s
