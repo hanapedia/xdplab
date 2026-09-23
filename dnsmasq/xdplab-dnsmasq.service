@@ -1,0 +1,26 @@
+[Unit]
+Description=dnsmasq (DHCP only) for XDP point-to-point VM addressing, containerized
+Documentation=https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f xdplab-dnsmasq
+ExecStart=/usr/bin/docker run --rm --name xdplab-dnsmasq \
+  --network host \
+  --read-only \
+  --cap-drop ALL \
+  --cap-add NET_ADMIN \
+  --cap-add NET_BIND_SERVICE \
+  --cap-add NET_RAW \
+  --mount type=tmpfs,destination=/run/dnsmasq \
+  --mount type=bind,source=/etc/xdplab/dnsmasq/dnsmasq.conf,target=/etc/dnsmasq.conf,readonly \
+  xdplab/dnsmasq:local
+ExecStop=/usr/bin/docker stop -t 5 xdplab-dnsmasq
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
