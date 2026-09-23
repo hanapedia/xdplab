@@ -97,3 +97,54 @@ systemctl status vfio-bind-x550.service
 lspci -k -s 04:00.0
 lspci -k -s 04:00.1
 ```
+
+## Restore native driver (debugging)
+
+For testing the physical link without VFIO/QEMU in the picture at all — bind straight to the host's own `ixgbe` instead of `vfio-pci`.
+
+0. Release the devices — stop any VM holding them via passthrough first
+```sh
+sudo virsh destroy xdplab-vm1
+sudo virsh destroy xdplab-vm2
+```
+
+1. Disable the persistence service, so it doesn't reclaim the devices for `vfio-pci` on the next boot
+```sh
+sudo systemctl disable --now vfio-bind-x550.service
+```
+
+2. Unbind from `vfio-pci`
+```sh
+echo 0000:04:00.0 | sudo tee /sys/bus/pci/devices/0000:04:00.0/driver/unbind
+echo 0000:04:00.1 | sudo tee /sys/bus/pci/devices/0000:04:00.1/driver/unbind
+```
+
+3. Clear the driver override — otherwise the next probe just rebinds `vfio-pci` again
+```sh
+echo "" | sudo tee /sys/bus/pci/devices/0000:04:00.0/driver_override
+echo "" | sudo tee /sys/bus/pci/devices/0000:04:00.1/driver_override
+```
+
+4. Trigger re-probe — binds to `ixgbe` via normal PCI ID matching, since no override is set
+```sh
+echo 0000:04:00.0 | sudo tee /sys/bus/pci/drivers_probe
+echo 0000:04:00.1 | sudo tee /sys/bus/pci/drivers_probe
+```
+
+5. Confirm, then bring the links up
+```sh
+lspci -k -s 04:00.0
+lspci -k -s 04:00.1
+sudo ip link set enp4s0f0 up
+sudo ip link set enp4s0f1 up
+ip -brief link show enp4s0f0
+ip -brief link show enp4s0f1
+```
+
+**Back to VFIO passthrough when done debugging:** re-run `vfio-bind-x550.sh` (§Persistence step 1) to rebind both ports to `vfio-pci` immediately, then re-enable the service so it survives reboots:
+```sh
+sudo /usr/local/sbin/vfio-bind-x550.sh
+sudo systemctl enable --now vfio-bind-x550.service
+lspci -k -s 04:00.0
+lspci -k -s 04:00.1
+```
