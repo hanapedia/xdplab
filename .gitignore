@@ -2,10 +2,11 @@
 **/.terraform/
 *.tfstate
 *.tfstate.*
-terraform/terraform.tfvars
+vm/terraform/terraform.tfvars
 crash.log
 crash.*.log
 
 # Talos build output -- generated ISOs (large binaries) and rendered machine
 # configs (contain fresh PKI/secrets from `talosctl gen config`)
-talos/out/
+vm/talos/out/
+vm/talos/terraform/rendered/

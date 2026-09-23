@@ -27,9 +27,9 @@ variable "install_iso_path" {
   type        = string
 }
 
-variable "kernel_module_config_iso_path" {
-  description = "Path to the metal-iso config volume delivering .machine.kernel.modules (ixgbe) — built via talos/scripts/build-node-config-iso.sh from a talosctl gen config using talos/patches/kernel-modules.yaml, shared by every VM"
-  type        = string
+variable "node_config_iso_paths" {
+  description = "Per-VM metal-iso config volume paths, keyed like var.vms — each is the full rendered machine config (talos/terraform's render.tf output, wrapped by talos/scripts/build-node-config-iso.sh). Talos requires a complete valid config (cluster CA present) to accept it at all, so this can't be a shared/partial config across VMs -- each node gets its own, and self-installs/self-configures from it on first boot (see talos/terraform/README notes in DESIGN.md §3)."
+  type        = map(string)
 }
 
 variable "vm_disk_capacity_gib" {

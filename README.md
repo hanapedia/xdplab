@@ -9,5 +9,6 @@ Two machines, two direct 10GbE links:
 
 BGP (BIRD) is the underlay: `r9600` ↔ `r5500` over the LAN today, extending to each Talos node once the CNI's BGP mode is up.
 
-- [DESIGN.md](DESIGN.md) — full design
+- [DESIGN.md](DESIGN.md) — underlay design (BGP mesh, DHCP addressing)
+- [vm/DESIGN.md](vm/DESIGN.md) — VM-based Kubernetes on the underlay (VFIO, Talos)
 - [SPEC.md](SPEC.md) — hardware, interfaces, addressing

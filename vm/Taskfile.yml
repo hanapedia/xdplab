@@ -1,0 +1,123 @@
+version: '3'
+
+# VM-based Kubernetes bootstrap: libvirt/OpenTofu VMs (terraform/) running
+# Talos (talos/), plus the registry mirrors (regmirror/) they need since the
+# VMs have no route to the public internet. Standalone from the root
+# Taskfile.yml on purpose -- this whole directory is one way to get XDP onto
+# the underlay (DESIGN.md), not the only one; run these from here (`cd vm &&
+# task <name>`) or `task --dir vm <name>` from the repo root. Underlay tasks
+# (BIRD, dnsmasq, FIB) are in ../Taskfile.yml, untouched by anything here.
+
+vars:
+  HOSTNAME:
+    sh: hostname
+  R5500_HOST:
+    sh: echo "${R5500_HOST:-r5500}"
+  R5500_DEPLOY_DIR:
+    sh: echo "${R5500_DEPLOY_DIR:-/opt/xdplab}"
+
+tasks:
+  # --- r5500 deploy plumbing (regmirror only -- bird/dnsmasq are the
+  # underlay's, synced by ../Taskfile.yml's own r5500:sync) ----------------
+  r5500:sync:
+    desc: Rsync regmirror/ to {{.R5500_HOST}}:{{.R5500_DEPLOY_DIR}}
+    run: once
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo mkdir -p {{.R5500_DEPLOY_DIR}} && sudo chown "$(id -un):$(id -gn)" {{.R5500_DEPLOY_DIR}}'
+      - rsync -az --delete -e ssh regmirror/ {{.R5500_HOST}}:{{.R5500_DEPLOY_DIR}}/regmirror/
+
+  # --- registry mirrors (r5500 only, §3) -----------------------------------
+  # The VMs have no route to the public internet, so image pulls (Talos's
+  # own install image, then Kubernetes component images) go through
+  # pull-through caches on r5500 instead. See regmirror/mirrors.conf and
+  # .machine.registries.mirrors in talos/terraform/machine_configs.tf.
+  regmirror:setup:
+    desc: Sync + set up the registry mirror caches on r5500, over SSH from here
+    deps: [r5500:sync]
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/regmirror/scripts/regmirror-ctl.sh setup'
+
+  regmirror:destroy:
+    desc: Tear down the registry mirror caches on r5500, over SSH from here
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/regmirror/scripts/regmirror-ctl.sh destroy'
+
+  regmirror:status:
+    desc: Show registry mirror cache status on r5500, over SSH from here
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/regmirror/scripts/regmirror-ctl.sh status'
+
+  # --- Talos boot media (r9600 only, §2/§3) --------------------------------
+  # ixgbe ships in Talos but as a loadable module Talos won't auto-probe, and
+  # Talos requires a complete, valid config (cluster CA present) before it'll
+  # accept anything from a metal-iso volume at all -- so each node carries its
+  # own full rendered config (talos/terraform's render.tf) and self-installs
+  # from it, via talos.config=metal-iso (baked into the installer's kernel
+  # cmdline), zero network dependency. See talos/terraform, DESIGN.md §3.
+  talos:iso:installer:
+    desc: 'Build the shared Talos installer ISO with talos.config=metal-iso baked in. Usage: task talos:iso:installer -- <talos-version>'
+    cmds:
+      - talos/scripts/build-installer-iso.sh {{.CLI_ARGS}}
+
+  talos:config:render:
+    desc: Render each node's full machine config via OpenTofu (talos/terraform/rendered/*.yaml)
+    dir: talos/terraform
+    cmds:
+      - tofu init -input=false
+      - tofu apply -auto-approve -target=local_sensitive_file.control_plane -target=local_sensitive_file.worker
+
+  talos:iso:config:
+    desc: Render + build + deploy both nodes' metal-iso config volumes to the libvirt pool (run this ON r9600)
+    deps: [talos:config:render]
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - talos/scripts/build-node-config-iso.sh talos/terraform/rendered/control-plane.yaml control-plane-config.iso
+      - talos/scripts/build-node-config-iso.sh talos/terraform/rendered/worker.yaml worker-config.iso
+      - sudo cp talos/out/control-plane-config.iso /var/lib/libvirt/images/xdplab/talos-control-plane-config.iso
+      - sudo cp talos/out/worker-config.iso /var/lib/libvirt/images/xdplab/talos-worker-config.iso
+
+  # --- Talos VMs, OpenTofu (r9600 only, §2) --------------------------------
+  vm:setup:
+    desc: Provision/start the Talos VMs via OpenTofu (run this ON r9600, after task talos:iso:config)
+    dir: terraform
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - tofu init -input=false
+      - tofu apply -auto-approve
+
+  vm:destroy:
+    desc: Destroy the Talos VMs via OpenTofu (run this ON r9600)
+    dir: terraform
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - tofu destroy -auto-approve
+
+  vm:status:
+    desc: Show VM status -- libvirt state, OpenTofu outputs (run this ON r9600; for DHCP leases see dnsmasq:status in ../Taskfile.yml)
+    dir: terraform
+    cmds:
+      - sudo virsh list --all
+      - tofu output
+
+  # --- Kubernetes bootstrap, OpenTofu (r9600 only, §3) ---------------------
+  talos:bootstrap:
+    desc: Bootstrap the Kubernetes cluster + fetch kubeconfig via OpenTofu (run after task vm:setup, once the nodes have self-installed and are reachable)
+    dir: talos/terraform
+    cmds:
+      - tofu apply -auto-approve
+
+  talos:teardown:
+    desc: Tear down the Kubernetes cluster and VMs -- bootstrap/kubeconfig/secrets first, then the VMs/disks/pool (run this ON r9600). Underlay (BIRD, dnsmasq, regmirror) is untouched.
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - dir: talos/terraform
+        cmd: tofu destroy -auto-approve
+      - task: vm:destroy

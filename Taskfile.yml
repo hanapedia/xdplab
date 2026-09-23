@@ -1,5 +1,10 @@
 version: '3'
 
+# Underlay only (BGP mesh + DHCP addressing, DESIGN.md §1). VM-based
+# Kubernetes bootstrap (OpenTofu, Talos, the registry mirrors) lives in
+# vm/Taskfile.yml -- a separate, standalone Taskfile, so this one stays
+# usable regardless of which approach sits on top of the underlay.
+
 vars:
   HOSTNAME:
     sh: hostname
@@ -97,50 +102,6 @@ tasks:
     desc: Show dnsmasq status + active leases on r5500, over SSH from here
     cmds:
       - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/dnsmasq/scripts/dnsmasq-ctl.sh status'
-
-  # --- Talos boot media (r9600 only, §2/§3) --------------------------------
-  # ixgbe ships in Talos but as a loadable module Talos won't auto-probe, so
-  # every VM needs .machine.kernel.modules delivered via a metal-iso volume
-  # (talos.config=metal-iso, baked into the installer's kernel cmdline) --
-  # independent of DHCP-vs-static addressing, and required regardless of
-  # Talos version. See talos/patches/kernel-modules.yaml.
-  talos:iso:installer:
-    desc: 'Build the shared Talos installer ISO with talos.config=metal-iso baked in. Usage: task talos:iso:installer -- <talos-version>'
-    cmds:
-      - talos/scripts/build-installer-iso.sh {{.CLI_ARGS}}
-
-  talos:iso:config:
-    desc: 'Wrap a rendered Talos machine config (talosctl gen config ... --config-patch @talos/patches/kernel-modules.yaml) into the shared metal-iso config volume. Usage: task talos:iso:config -- <config.yaml>'
-    cmds:
-      - talos/scripts/build-node-config-iso.sh {{.CLI_ARGS}}
-
-  # --- Talos VMs, OpenTofu (r9600 only, §2) --------------------------------
-  vm:setup:
-    desc: Provision/start the Talos VMs via OpenTofu (run this ON r9600)
-    dir: terraform
-    preconditions:
-      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
-        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
-    cmds:
-      - tofu init -input=false
-      - tofu apply -auto-approve
-
-  vm:destroy:
-    desc: Destroy the Talos VMs via OpenTofu (run this ON r9600)
-    dir: terraform
-    preconditions:
-      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
-        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
-    cmds:
-      - tofu destroy -auto-approve
-
-  vm:status:
-    desc: Show VM status -- libvirt state, OpenTofu outputs, DHCP leases (run this ON r9600)
-    dir: terraform
-    cmds:
-      - sudo virsh list --all
-      - tofu output
-      - task: dnsmasq:status
 
   # --- whole underlay, orchestrated from wherever `task` runs --------------
   underlay:setup:

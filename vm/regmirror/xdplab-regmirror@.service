@@ -1,0 +1,24 @@
+[Unit]
+Description=Pull-through registry mirror cache for %i (registry:2, containerized)
+Documentation=https://distribution.github.io/distribution/about/configuration/
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/xdplab/regmirror/%i.env
+ExecStartPre=-/usr/bin/docker rm -f xdplab-regmirror-%i
+ExecStartPre=-/usr/bin/docker pull registry:2
+ExecStart=/usr/bin/docker run --rm --name xdplab-regmirror-%i \
+  --network host \
+  --env REGISTRY_PROXY_REMOTEURL \
+  --env REGISTRY_HTTP_ADDR \
+  --mount type=bind,source=/var/lib/xdplab/regmirror/%i,target=/var/lib/registry \
+  registry:2
+ExecStop=/usr/bin/docker stop -t 5 xdplab-regmirror-%i
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

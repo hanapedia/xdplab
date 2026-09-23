@@ -75,10 +75,11 @@ resource "libvirt_domain" "vm" {
         }
       },
       {
-        # Delivers .machine.kernel.modules (ixgbe) via talos.config=metal-iso
-        # -- the installer ISO's baked-in kernel arg makes Talos read this at
-        # boot, no network needed. Shared/identical across VMs; not a boot
-        # device, just needs to be a visible block device.
+        # This node's full machine config (talos/terraform's render.tf),
+        # delivered via talos.config=metal-iso -- the installer ISO's baked-in
+        # kernel arg makes Talos read this at boot, no network needed. Not a
+        # boot device, just needs to be a visible block device. Per-node, not
+        # shared -- see var.node_config_iso_paths.
         device    = "cdrom"
         read_only = true
         driver = {
@@ -87,7 +88,7 @@ resource "libvirt_domain" "vm" {
         }
         source = {
           file = {
-            file = var.kernel_module_config_iso_path
+            file = var.node_config_iso_paths[each.key]
           }
         }
         target = {
