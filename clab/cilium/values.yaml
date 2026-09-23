@@ -1,0 +1,25 @@
+bgpControlPlane:
+  enabled: true
+bpf:
+  hostLegacyRouting: false
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+# eth1 is the renamed physical XDP-link port inside each node's netns
+# (../DESIGN.md "Giving nodes real NICs") -- not kind's default docker-bridge
+# interface, which stays untouched for control-plane traffic.
+devices: "eth1"
+enableIPv4Masquerade: false
+ipam:
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.64.0.0/16   # matches clab/coil/address_pool.yaml -- only one CNI is installed at a time
+k8sServiceHost: xdplab-control-plane
+k8sServicePort: 6443
+kubeProxyReplacement: true
+l7Proxy: false
+nodePort:
+  directRoutingDevice: "eth1"
+  enabled: true
+routingMode: "native"

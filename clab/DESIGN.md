@@ -18,17 +18,18 @@ kind's own control-plane traffic (etcd, API server, kubelet↔apiserver) stays o
 ## Kind cluster topology (containerlab)
 
 - The kind cluster is deployed through containerlab's `k8s-kind` node kind, with the kind cluster config passed as `startup-config`.
-- Each kind node is additionally declared as an `ext-container` so containerlab can wire links to it and run `exec` commands inside it.
-- Two node containers, one per X550 port: `control-plane`, `worker`.
+- Each kind node is additionally declared as an `ext-container` so containerlab can wire links to it and run `exec` commands inside it. An `ext-container` node's name in the topology must be the container's *actual* existing name — kind names its own containers `<cluster-name>-<role>`, not containerlab's usual `clab-<topology-name>-<node-name>`, since containerlab didn't create it.
+- Kind cluster name: `xdplab` (so the two node containers are `xdplab-control-plane`, `xdplab-worker`) — containerlab topology name: `xdplab` too, for consistency, though the two aren't required to match.
 
 Two fixed nodes with fixed addresses — no templating layer (`.tmpl` + generator task) needed for the topology file itself; a static `cluster.clab.yaml` is simpler and sufficient here. (Contrast with `vm/talos/terraform`, which *does* template — Talos configs are large, secret-bearing, generated documents, a different scale of problem than a handful of static container definitions.)
 
 ## Giving nodes real NICs
 
-Each X550 port stays bound to `ixgbe` throughout — no VFIO. A wrapper script, run after `containerlab deploy`, does the move:
+Each X550 port stays bound to `ixgbe` throughout — no VFIO.
 
 - **Why not VFIO:** a container shares the host kernel and has no driver of its own to take over a VFIO device — VFIO only makes sense for VMs or userspace data planes like DPDK.
-- **Why a wrapper script, not a containerlab link type:** containerlab has no link type that moves a physical NIC in; `exec` runs inside the container, where the NIC isn't visible yet to move itself; and its `macvlan` link type would only allow generic-mode XDP, not native.
+- **Why not a containerlab link type:** containerlab has no link type that moves a physical NIC in, and its `macvlan` link type would only allow generic-mode XDP, not native.
+- **How the move happens, declaratively:** a kind node's own `exec:` can't do it — the NIC isn't visible inside a netns it hasn't been moved into yet. Instead, one extra containerlab node with `network-mode: host` ([containerlab docs](https://containerlab.dev/manual/network/#host-mode-networking) — attaches the container straight to the host's own network namespace) runs the move as its `exec:` block. `exec` commands run once, right after that node finishes booting, as part of `containerlab deploy` itself — no separate script to remember to run afterward. It still needs the target kind node's PID to move the port into (e.g. `docker inspect -f '{{.State.Pid}}' xdplab-control-plane`), which means either the docker socket bind-mounted into this node's image or some other PID lookup — not yet nailed down.
 
 **Addressing — DHCP before the move, not after.** Moving an interface to a different netns (`ip link set <dev> netns <pid>`) flushes its addresses — the kernel treats addresses/routes as scoped to a namespace, so they don't carry across. Rather than adding a DHCP client into the (otherwise minimal) kind node image, get the address the normal way first, while the port is still easy to reach from the host:
 
@@ -48,7 +49,7 @@ docker exec <node-container> ip link set eth1 up
 
 Keeps `dnsmasq`'s existing per-MAC reservations on `r5500` completely unchanged — the physical MAC doing the DHCP request is the same either way, whether that request comes from the host or a container. **To verify empirically:** that address flush on netns-move is really what happens on this kernel/driver (documented general behavior, not yet confirmed on this hardware) — if addresses do survive the move, this simplifies to a plain DHCP request with no learn-then-reapply step.
 
-**Teardown — move the port back to the host netns first.** Linux is expected to fall back a *real* device (unlike a virtual one such as veth) to the host's initial netns automatically if its current netns is destroyed while still holding it, rather than deleting it — but that's relying on implicit kernel behavior for a physical port, worth avoiding. Explicitly reverse the move (rename back, `ip link set <port> netns 1` or equivalent) as an ordered step before `containerlab destroy`, so the port's fate is deterministic and observable either way.
+**Teardown — move the port back to the host netns first.** Linux is expected to fall back a *real* device (unlike a virtual one such as veth) to the host's initial netns automatically if its current netns is destroyed while still holding it, rather than deleting it — but that's relying on implicit kernel behavior for a physical port, worth avoiding. `exec:` has no destroy-time equivalent (it only ever runs once, right after deploy), so this can't be folded into the topology the way the move itself can — it has to be a separate, explicit step (rename back, `ip link set <port> netns 1` or equivalent) run before `containerlab destroy`, e.g. from a Taskfile task, so the port's fate is deterministic and observable either way.
 
 ## BGP in each node's netns
 
@@ -56,7 +57,7 @@ Each kind node runs its own BIRD instance, in the *same* netns as the node — n
 
 ```yaml
 control-plane:
-  network-mode: container:clab-xdplab-control-plane   # same netns as the kind node
+  network-mode: container:xdplab-control-plane   # same netns as the kind node -- kind's own container name
   kind: linux
   image: bird:3.2.2.1-xdplab
   binds:
@@ -86,7 +87,7 @@ router id 10.10.0.2;
 protocol bgp r5500 {
   local as 64514;
   neighbor 10.10.0.1 as 64513;
-  ipv4 { import all; export all; };  # export narrows to the pod CIDR once a CNI is chosen
+  ipv4 { import all; export all; };  # export narrows to the pod CIDR once Coil/Cilium is wired in, see "CNI" below
 }
 ```
 ```
@@ -106,9 +107,12 @@ Static per-node files (`bird/control-plane.conf`, `bird/worker.conf`), same as `
 - A physical port can belong to only one namespace at a time, so there is one port per node container.
 - A node container restart destroys its netns, which falls the port back to the host namespace same as the teardown case above — the move (and DHCP) script has to run again afterward, not only at initial deploy.
 
-## Open question: CNI
+## CNI: Coil and Cilium
 
-Same open question as `vm/DESIGN.md` §4 — a CNI that participates in the BGP mesh (Calico or Cilium BGP mode), so pod CIDRs get advertised over each node's own BIRD session above. Not yet decided; the per-node BGP groundwork here is a prerequisite either way.
+Both, not a single final choice — same two options `mooring/e2e_v2` already exercises, with its install tasks imported and adapted (kind cluster name, `eth1` as the physical-link device, fresh ASNs): [`coil/Taskfile.yaml`](coil/Taskfile.yaml), [`cilium/Taskfile.yaml`](cilium/Taskfile.yaml), wired into [`Taskfile.yml`](Taskfile.yml) (`task coil:install`, `task cilium:install`). Neither talks BGP to `r5500` directly — both hand pod-route advertisement to the node's own BIRD instance from §"BGP in each node's netns" instead, just via different mechanisms:
+
+- **Coil** writes pod routes into a dedicated Linux kernel table; BIRD picks them up with a `protocol kernel 'coil' { learn; ... }` reading that table, merges them into its main table via a `protocol pipe`, and they ride out through BIRD's existing eBGP session to `r5500`. No BGP speaker in Coil itself — the same "dedicated kernel table, picked up by a rule/pipe" shape already used for `r9600`'s own FIB ([`../DESIGN.md`](../DESIGN.md) §1.3), just Coil populating the table instead of BIRD's own `ip rule`.
+- **Cilium** runs its own BGP speaker and peers with BIRD over loopback (`127.0.0.1`) — a second, local-only BGP session distinct from BIRD's outward one to `r5500`, on its own ASN pair (`64516` Cilium / `64517` BIRD) so it can't collide with the real per-node ASNs (`64514`/`64515`) or `r5500`'s (`64513`). BIRD then re-advertises whatever it learns there out through its `r5500` session, same as Coil's routes. Cluster-wide `CiliumBGPClusterConfig`, no node selector — unlike `mooring/e2e_v2`'s rack-labeled subset, both of xdplab's nodes need it.
 
 ## Future work
 

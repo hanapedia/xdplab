@@ -1,0 +1,42 @@
+---
+# Cilium's own BGP speaker peers locally with the node's BIRD instance over
+# loopback (not with r5500 directly) -- BIRD is what actually reaches r5500
+# over the real link (../DESIGN.md "BGP in each node's netns"). No
+# nodeSelector: applies to every node, since xdplab only has two and both
+# need it (unlike mooring/e2e_v2's rack-labeled subset).
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPClusterConfig
+metadata:
+  name: cilium-bgp
+spec:
+  bgpInstances:
+  - name: cilium-agent
+    localASN: 64516
+    peers:
+    - name: bird-sidecar
+      peerASN: 64517
+      peerAddress: 127.0.0.1
+      peerConfigRef:
+        name: default-peer-config
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPPeerConfig
+metadata:
+  name: default-peer-config
+spec:
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          advertise: pod-cidr
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPAdvertisement
+metadata:
+  name: pod-cidr
+  labels:
+    advertise: pod-cidr
+spec:
+  advertisements:
+    - advertisementType: "PodCIDR"

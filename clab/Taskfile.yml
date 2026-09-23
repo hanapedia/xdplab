@@ -1,0 +1,21 @@
+version: '3'
+
+# kind + containerlab on the underlay -- an alternative to vm/, see
+# clab/DESIGN.md. Standalone from the root Taskfile.yml and from
+# vm/Taskfile.yml, same reasoning as the latter: run from here (`cd clab &&
+# task <name>`) or `task --dir clab <name>` from the repo root. Underlay
+# tasks (BIRD, dnsmasq, FIB) are in ../Taskfile.yml, untouched by anything
+# here.
+#
+# Topology/VM-setup tasks (containerlab deploy, the NIC move script) aren't
+# built yet -- only the CNI install tasks so far, each a standalone Taskfile
+# adapted from ../../mooring/e2e_v2 (coil/cilium install machinery is
+# reusable as-is; only the kind-cluster name and physical-NIC device name
+# needed adapting for xdplab, see coil/Taskfile.yaml and cilium/values.yaml).
+includes:
+  coil:
+    taskfile: ./coil/Taskfile.yaml
+    dir: ./coil
+  cilium:
+    taskfile: ./cilium/Taskfile.yaml
+    dir: ./cilium
