@@ -1,0 +1,11 @@
+# OpenTofu / Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+terraform/terraform.tfvars
+crash.log
+crash.*.log
+
+# Talos build output -- generated ISOs (large binaries) and rendered machine
+# configs (contain fresh PKI/secrets from `talosctl gen config`)
+talos/out/
