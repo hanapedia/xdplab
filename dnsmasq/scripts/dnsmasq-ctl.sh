@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Sets up / tears down the containerized dnsmasq DHCP instance + systemd unit
-# on r5500 — serves per-MAC static reservations to VM1/VM2 over the two XDP
-# point-to-point links (DESIGN.md §1.2/§3). r5500-only; unlike bird-ctl.sh
-# there's no per-hostname config, since dnsmasq only ever runs here.
+# on r5500 — serves per-MAC static reservations to the VMs (control-plane,
+# worker) over the two XDP point-to-point links (DESIGN.md §1.2/§3).
+# r5500-only; unlike bird-ctl.sh there's no per-hostname config, since
+# dnsmasq only ever runs here.
 set -euo pipefail
 
 IMAGE="xdplab/dnsmasq:local"

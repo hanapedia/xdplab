@@ -104,8 +104,8 @@ For testing the physical link without VFIO/QEMU in the picture at all — bind s
 
 0. Release the devices — stop any VM holding them via passthrough first
 ```sh
-sudo virsh destroy xdplab-vm1
-sudo virsh destroy xdplab-vm2
+sudo virsh destroy xdplab-control-plane
+sudo virsh destroy xdplab-worker
 ```
 
 1. Disable the persistence service, so it doesn't reclaim the devices for `vfio-pci` on the next boot
