@@ -11,4 +11,5 @@ BGP (BIRD) is the underlay: `r9600` ↔ `r5500` over the LAN today, extending to
 
 - [DESIGN.md](DESIGN.md) — underlay design (BGP mesh, DHCP addressing)
 - [vm/DESIGN.md](vm/DESIGN.md) — VM-based Kubernetes on the underlay (VFIO, Talos)
+- [clab/DESIGN.md](clab/DESIGN.md) — kind + containerlab on the underlay, no VMs (draft)
 - [SPEC.md](SPEC.md) — hardware, interfaces, addressing
