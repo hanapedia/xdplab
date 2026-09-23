@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars (gitignored) and adjust.
+
+# Built via: talos/scripts/build-installer-iso.sh <talos-version>
+install_iso_path = "../talos/out/metal-amd64.iso"
+
+# Built via: talosctl gen config <cluster-name> <endpoint> \
+#   --config-patch @../talos/patches/kernel-modules.yaml \
+#   --install-disk /dev/vda -t controlplane -o config.yaml
+# then: talos/scripts/build-node-config-iso.sh config.yaml
+kernel_module_config_iso_path = "../talos/out/kernel-modules-config.iso"
