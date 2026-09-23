@@ -7,11 +7,9 @@ version: '3'
 # tasks (BIRD, dnsmasq, FIB) are in ../Taskfile.yml, untouched by anything
 # here.
 #
-# Topology/VM-setup tasks (containerlab deploy, the NIC move script) aren't
-# built yet -- only the CNI install tasks so far, each a standalone Taskfile
-# adapted from ../../mooring/e2e_v2 (coil/cilium install machinery is
-# reusable as-is; only the kind-cluster name and physical-NIC device name
-# needed adapting for xdplab, see coil/Taskfile.yaml and cilium/values.yaml).
+# coil/cilium install machinery is imported from ../../mooring/e2e_v2
+# largely as-is (coil/Taskfile.yaml, cilium/Taskfile.yaml) -- only the
+# kind-cluster name and physical-NIC device name needed adapting for xdplab.
 includes:
   coil:
     taskfile: ./coil/Taskfile.yaml
@@ -19,3 +17,41 @@ includes:
   cilium:
     taskfile: ./cilium/Taskfile.yaml
     dir: ./cilium
+
+vars:
+  HOSTNAME:
+    sh: hostname
+
+tasks:
+  build-images:
+    desc: Build the mover and BIRD sidecar images
+    cmds:
+      - docker build -t xdplab-mover:local mover/
+      - docker build -t xdplab-bird:local bird/
+
+  start:
+    desc: Deploy the kind+containerlab topology (physical NICs moved into the kind nodes, BIRD peering with r5500) and export kubeconfig (run this ON r9600)
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - task: build-images
+      - sudo containerlab deploy -t cluster.clab.yaml
+      - kind export kubeconfig --name xdplab
+
+  stop:
+    desc: Tear down the kind+containerlab topology -- moves both physical NICs back to the host netns first (clab/DESIGN.md "Giving nodes real NICs"), then destroys (run this ON r9600)
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - task: restore-nics
+      - sudo containerlab destroy -t cluster.clab.yaml --cleanup
+
+  restore-nics:
+    desc: Move both physical NICs back to the host netns without tearing anything else down (best-effort -- e.g. after a node restart, clab/DESIGN.md "Operational notes")
+    cmds:
+      - cmd: sudo sh mover/restore.sh xdplab-control-plane eth1 enp4s0f0
+        ignore_error: true
+      - cmd: sudo sh mover/restore.sh xdplab-worker eth1 enp4s0f1
+        ignore_error: true

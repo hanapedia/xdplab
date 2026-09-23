@@ -1,0 +1,50 @@
+name: xdplab
+topology:
+  nodes:
+    xdplab:
+      kind: k8s-kind
+      image: kindest/node:v1.34.8
+      startup-config: cluster.kind.yaml
+      extras:
+        k8s_kind:
+          deploy:
+            wait: 0s
+    xdplab-control-plane:
+      kind: ext-container
+    xdplab-worker:
+      kind: ext-container
+    mover:
+      kind: linux
+      image: xdplab-mover:local
+      network-mode: host
+      binds:
+        - /var/run/docker.sock:/var/run/docker.sock
+        - /proc:/hostproc:ro   # network-mode: host shares the netns, not the PID ns -- need this to reach another container's /proc/<pid>/ns/net
+        - mover/move.sh:/move.sh
+      stages:
+        configure:
+          exec:
+            - command: sh /move.sh enp4s0f0 xdplab-control-plane
+            - command: sh /move.sh enp4s0f1 xdplab-worker
+    control-plane:
+      network-mode: container:xdplab-control-plane
+      kind: linux
+      image: xdplab-bird:local
+      binds:
+        - bird/control-plane.conf:/etc/bird/bird.conf
+      stages:
+        create:
+          wait-for:
+            - node: mover
+              stage: configure   # eth1 must actually be in place before bird starts, not just "creation started"
+    worker:
+      network-mode: container:xdplab-worker
+      kind: linux
+      image: xdplab-bird:local
+      binds:
+        - bird/worker.conf:/etc/bird/bird.conf
+      stages:
+        create:
+          wait-for:
+            - node: mover
+              stage: configure

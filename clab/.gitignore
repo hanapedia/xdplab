@@ -1,0 +1,4 @@
+# containerlab's generated per-lab state directory (topology-data.json,
+# ansible/nornir inventories, TLS material, SSH config) -- reproducible from
+# cluster.clab.yaml via `containerlab deploy`.
+clab-*/
