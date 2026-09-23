@@ -3,28 +3,163 @@ version: '3'
 vars:
   HOSTNAME:
     sh: hostname
+  R5500_HOST:
+    sh: echo "${R5500_HOST:-r5500}"
+  R5500_DEPLOY_DIR:
+    sh: echo "${R5500_DEPLOY_DIR:-/opt/xdplab}"
 
 tasks:
-  bird:setup:
-    desc: Set up BIRD (container + systemd unit; also the dedicated FIB + ip rule on r9600)
+  # --- r5500 deploy plumbing ----------------------------------------------
+  # r5500 gets no git clone of its own -- every r5500-only or dual-host
+  # component is rsynced here on demand from whichever machine runs `task`
+  # (normally r9600), so r5500 stays a pure deploy target. Idempotent: the
+  # mkdir/chown are no-ops once done, and rsync --delete keeps the mirror
+  # exact on every run. Assumes passwordless sudo on r5500 for this user.
+  r5500:sync:
+    desc: Rsync bird/ and dnsmasq/ to {{.R5500_HOST}}:{{.R5500_DEPLOY_DIR}}
+    run: once
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo mkdir -p {{.R5500_DEPLOY_DIR}} && sudo chown "$(id -un):$(id -gn)" {{.R5500_DEPLOY_DIR}}'
+      - rsync -az --delete -e ssh bird/ {{.R5500_HOST}}:{{.R5500_DEPLOY_DIR}}/bird/
+      - rsync -az --delete -e ssh dnsmasq/ {{.R5500_HOST}}:{{.R5500_DEPLOY_DIR}}/dnsmasq/
+
+  # --- BIRD (runs on both hosts, §1.3) -------------------------------------
+  bird:setup:r9600:
+    desc: Set up BIRD + the dedicated FIB/ip rule on r9600 (run this ON r9600)
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
     cmds:
       - task: fib:setup
-        if: '{{eq .HOSTNAME "r9600"}}'
       - sudo bird/scripts/bird-ctl.sh setup
 
-  bird:destroy:
-    desc: Tear down BIRD (systemd unit + container; also the dedicated FIB + ip rule on r9600)
+  bird:destroy:r9600:
+    desc: Tear down BIRD + the dedicated FIB/ip rule on r9600 (run this ON r9600)
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
     cmds:
       - sudo bird/scripts/bird-ctl.sh destroy
       - task: fib:destroy
-        if: '{{eq .HOSTNAME "r9600"}}'
 
+  bird:status:r9600:
+    desc: Show BIRD + FIB status on r9600 (run this ON r9600)
+    cmds:
+      - sudo bird/scripts/bird-ctl.sh status
+      - sudo bird/scripts/fib-ctl.sh status
+
+  bird:setup:r5500:
+    desc: Sync + set up BIRD on r5500, over SSH from here
+    deps: [r5500:sync]
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/bird/scripts/bird-ctl.sh setup'
+
+  bird:destroy:r5500:
+    desc: Tear down BIRD on r5500, over SSH from here
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/bird/scripts/bird-ctl.sh destroy'
+
+  bird:status:r5500:
+    desc: Show BIRD status on r5500, over SSH from here
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/bird/scripts/bird-ctl.sh status'
+
+  # --- dedicated FIB (r9600 only, independent of the BIRD container, §1.3) -
   fib:setup:
     desc: Set up the dedicated FIB (table 100/xdplab) + ip rule (r9600 only)
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
     cmds:
       - sudo bird/scripts/fib-ctl.sh setup
 
   fib:destroy:
     desc: Tear down the dedicated FIB (table 100/xdplab) + ip rule (r9600 only)
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
     cmds:
       - sudo bird/scripts/fib-ctl.sh destroy
+
+  # --- dnsmasq (r5500 only, §1.2) ------------------------------------------
+  dnsmasq:setup:
+    desc: Sync + build the dnsmasq image + set it up on r5500, over SSH from here
+    deps: [r5500:sync]
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/dnsmasq/scripts/dnsmasq-ctl.sh setup'
+
+  dnsmasq:destroy:
+    desc: Tear down dnsmasq on r5500, over SSH from here
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/dnsmasq/scripts/dnsmasq-ctl.sh destroy'
+
+  dnsmasq:status:
+    desc: Show dnsmasq status + active leases on r5500, over SSH from here
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/dnsmasq/scripts/dnsmasq-ctl.sh status'
+
+  # --- Talos boot media (r9600 only, §2/§3) --------------------------------
+  # ixgbe ships in Talos but as a loadable module Talos won't auto-probe, so
+  # every VM needs .machine.kernel.modules delivered via a metal-iso volume
+  # (talos.config=metal-iso, baked into the installer's kernel cmdline) --
+  # independent of DHCP-vs-static addressing, and required regardless of
+  # Talos version. See talos/patches/kernel-modules.yaml.
+  talos:iso:installer:
+    desc: 'Build the shared Talos installer ISO with talos.config=metal-iso baked in. Usage: task talos:iso:installer -- <talos-version>'
+    cmds:
+      - talos/scripts/build-installer-iso.sh {{.CLI_ARGS}}
+
+  talos:iso:config:
+    desc: 'Wrap a rendered Talos machine config (talosctl gen config ... --config-patch @talos/patches/kernel-modules.yaml) into the shared metal-iso config volume. Usage: task talos:iso:config -- <config.yaml>'
+    cmds:
+      - talos/scripts/build-node-config-iso.sh {{.CLI_ARGS}}
+
+  # --- Talos VMs, OpenTofu (r9600 only, §2) --------------------------------
+  vm:setup:
+    desc: Provision/start the Talos VMs via OpenTofu (run this ON r9600)
+    dir: terraform
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - tofu init -input=false
+      - tofu apply -auto-approve
+
+  vm:destroy:
+    desc: Destroy the Talos VMs via OpenTofu (run this ON r9600)
+    dir: terraform
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - tofu destroy -auto-approve
+
+  vm:status:
+    desc: Show VM status -- libvirt state, OpenTofu outputs, DHCP leases (run this ON r9600)
+    dir: terraform
+    cmds:
+      - sudo virsh list --all
+      - tofu output
+      - task: dnsmasq:status
+
+  # --- whole underlay, orchestrated from wherever `task` runs --------------
+  underlay:setup:
+    desc: Bring up the whole BGP/DHCP underlay -- BIRD+FIB on r9600, BIRD+dnsmasq on r5500 (run this ON r9600)
+    cmds:
+      - task: bird:setup:r9600
+      - task: bird:setup:r5500
+      - task: dnsmasq:setup
+
+  underlay:destroy:
+    desc: Tear down the whole underlay, reverse order of underlay:setup (run this ON r9600)
+    cmds:
+      - task: dnsmasq:destroy
+      - task: bird:destroy:r5500
+      - task: bird:destroy:r9600
+
+  underlay:status:
+    desc: Show status of every underlay component on both hosts (run this ON r9600)
+    cmds:
+      - task: bird:status:r9600
+      - task: bird:status:r5500
+      - task: dnsmasq:status

@@ -16,11 +16,11 @@ This is an experimentation environment, not a production system — rebuildabili
 ```
 r9600                                   r5500
 ┌─────────────┐                        ┌─────────────┐
-│  VM1 (Talos)│ ── enp?s0f0 ───cable── │ enp1s0f0    │
-│  10.10.0.2  │      (VFIO)            │ 10.10.0.1   │
+│control-plane│ ── enp?s0f0 ───cable── │ enp1s0f0    │
+│ 10.10.0.2   │      (VFIO)            │ 10.10.0.1   │
 │    /30      │                        │    /30      │  ── BIRD (BGP) ──
 ├─────────────┤                        ├─────────────┤     + kernel FIB
-│  VM2 (Talos)│ ── enp?s0f1 ───cable── │ enp1s0f1    │     forwarding
+│   worker    │ ── enp?s0f1 ───cable── │ enp1s0f1    │     forwarding
 │  10.10.1.2  │      (VFIO)            │ 10.10.1.1   │     between the
 │    /30      │                        │    /30      │     two links
 └─────────────┘                        └─────────────┘
@@ -32,8 +32,8 @@ r9600                                   r5500
 
 | Link | Subnet | `r5500` (router) | VM (`r9600` guest) |
 |---|---|---|---|
-| Link 0 | `10.10.0.0/30` | `10.10.0.1` (enp1s0f0) | `10.10.0.2` (VM1) |
-| Link 1 | `10.10.1.0/30` | `10.10.1.1` (enp1s0f1) | `10.10.1.2` (VM2) |
+| Link 0 | `10.10.0.0/30` | `10.10.0.1` (enp1s0f0) | `10.10.0.2` (`control-plane`) |
+| Link 1 | `10.10.1.0/30` | `10.10.1.1` (enp1s0f1) | `10.10.1.2` (`worker`) |
 
 | Host | LAN IP |
 |---|---|
@@ -45,8 +45,8 @@ No separate management/NAT NIC on the VMs — the passed-through XDP NIC does do
 ### BGP Mesh Overview
 
 - **`r9600` ↔ `r5500`**: standard BGP (port 179) over the shared LAN, both in default netns. Unrelated to the XDP point-to-point links.
-- **`r5500` ↔ VM1 / VM2**: implicitly via `r5500`'s directly-connected `/30` routes, redistributed into BGP toward `r9600` (§1.2).
-- **VM1 / VM2 ↔ `r5500` (later)**: once the CNI is installed, each Talos node runs its own BIRD instance (started by the CNI's BGP mode, e.g. Calico/Cilium) peering with `r5500` to advertise pod CIDRs — joining the same mesh (§4).
+- **`r5500` ↔ VMs**: implicitly via `r5500`'s directly-connected `/30` routes, redistributed into BGP toward `r9600` (§1.2).
+- **VMs ↔ `r5500` (later)**: once the CNI is installed, each Talos node runs its own BIRD instance (started by the CNI's BGP mode, e.g. Calico/Cilium) peering with `r5500` to advertise pod CIDRs — joining the same mesh (§4).
 
 ---
 
@@ -112,6 +112,17 @@ network:
 ```
 File permissions must be `600` (netplan refuses otherwise). Match by MAC + `set-name` so config survives PCI re-enumeration.
 
+**LAN** (`/etc/netplan/02-lan.yaml`):
+```yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp7s0:
+      dhcp4: true
+```
+Plain DHCP — `enp7s0` has no `match`/`set-name` since it's a fixed onboard port, not affected by the PCI re-enumeration concern the XDP ports have.
+
 **Routing sysctls** (`/etc/sysctl.d/99-xdp-routing.conf`):
 ```
 net.ipv4.ip_forward = 1
@@ -122,10 +133,12 @@ net.ipv4.conf.enp1s0f1.rp_filter = 0
 ```
 `rp_filter` fully disabled (not loose mode) — asymmetric routing is expected once BGP/multi-path is in play. Apply with `sysctl --system`.
 
+**DHCP (VM addressing, §3):** `dnsmasq`, containerized (image: [`dnsmasq/Dockerfile`](dnsmasq/Dockerfile), `ghcr.io/cybozu/ubuntu` base) — one instance bound to `enp1s0f0`/`enp1s0f1` only (`port=0`, no DNS role; never touches the LAN or loopback), handing out the two `/30` addresses as static per-MAC reservations (the VMs' *physical* NIC MACs, since VFIO passthrough preserves them) via `dhcp-range=...,static` + `dhcp-host=<mac>,<ip>` rather than baking config into VM boot media. Deployment: containerized via systemd, same pattern as BIRD (§1.3) but image is built locally rather than pulled, since there's no upstream registry for it. Config: [`dnsmasq/dnsmasq.conf`](dnsmasq/dnsmasq.conf). Control: `dnsmasq/scripts/dnsmasq-ctl.sh setup|destroy|status`.
+
 **BIRD (BGP):**
 - Peers with `r9600` over the LAN (port 179), both default netns.
 - Must explicitly export directly-connected routes into BGP — `protocol direct` doesn't redistribute by default; needs an export filter for the two `/30`s.
-- VM1/VM2 ↔ `r5500` traffic doesn't need BGP — that's plain kernel `ip_forward` between the two directly-connected subnets, active from day one regardless of BGP session state.
+- VM ↔ `r5500` traffic doesn't need BGP — that's plain kernel `ip_forward` between the two directly-connected subnets, active from day one regardless of BGP session state.
 - Later, once the CNI is up, `r5500`'s BIRD also peers with each Talos VM's BIRD instance (started by the CNI's BGP mode) to learn pod CIDR routes — same process, additional peer sessions.
 - Deployment: containerized via systemd — §1.3. Config: [`bird/conf/r5500.conf`](bird/conf/r5500.conf).
 
@@ -180,36 +193,34 @@ docker run --rm --name bird-bgp \
 
 ---
 
-## 2. Terraform VM Provisioning (`r9600`)
+## 2. VM Provisioning (`r9600`), OpenTofu
 
-**Provider:** `dmacvicar/libvirt` (v0.9+ rewrite — full `libvirtxml` schema coverage, including `DomainHostdev`/PCI passthrough). Confirm exact `hostdev` HCL field names against current registry docs before writing the resource — newer rewrite, hostdev path not exhaustively verified.
+Config: [`terraform/`](terraform/). Provider: `dmacvicar/libvirt` (v0.9.x rewrite — full `libvirtxml` schema coverage as nested attributes, not the older block style).
 
-**Scope boundary:** Terraform manages VM domain/disk/network resources only — not VFIO binding (§1.1) or IOMMU/BIOS/kernel cmdline prerequisites.
+**Scope boundary:** manages VM domain/disk/pool resources only — not VFIO binding (§1.1) or IOMMU/BIOS/kernel cmdline prerequisites.
 
-**Requirements:**
-1. One `libvirt_domain` resource per VM (2 total): `machine = "q35"`, UEFI/OVMF boot, `cpu = { mode = "host-passthrough" }`, one `hostdev` block pinned to that VM's PCI address (`0000:04:00.0` VM1, `0000:04:00.1` VM2), no separate virtual NIC.
-2. **Swappable install media** — ISO/image path as a Terraform variable (`var.install_iso_path`), not hardcoded, so other distros can be substituted later.
-3. Disk volumes as separate `libvirt_volume` resources (qcow2), one per VM.
-4. Consider parameterizing memory/vcpu counts too, for reuse across distro experiments.
+**Per VM** (`libvirt_domain`, one per entry in `var.vms`): `q35` machine, UEFI/OVMF boot (`os.firmware = "efi"`, per-VM NVRAM), `cpu = { mode = "host-passthrough" }`, one PCI `hostdev` pinned to that VM's physical NIC (`0000:04:00.0` `control-plane`, `0000:04:00.1` `worker` — no separate virtual NIC), a virtio disk backed by a dedicated `libvirt_volume` (qcow2), and two cdroms: the Talos installer (`var.install_iso_path`, built via [`talos/scripts/build-installer-iso.sh`](talos/scripts/build-installer-iso.sh) — not stock, see §3) and a shared `metal-iso` config volume (`var.kernel_module_config_iso_path`, built via [`talos/scripts/build-node-config-iso.sh`](talos/scripts/build-node-config-iso.sh)).
 
-**Optional follow-on:** the `siderolabs/talos` provider can generate/apply Talos machine configs declaratively, pairing with `libvirt_domain` for a fully Terraform-driven flow — separate provider/concern.
+**Storage:** a dedicated `libvirt_pool` (`xdplab`, `dir` type) rather than libvirt's own `default` pool — `dir` pools delete their backing storage on destroy by default, so `tofu destroy` fully wipes VM disks along with it.
+
+**Optional follow-on:** the `siderolabs/talos` provider could generate/apply Talos machine configs declaratively — separate provider/concern, not adopted yet.
 
 ---
 
 ## 3. Kubernetes Bootstrap (Talos)
 
-**Networking prerequisite:** each VM needs a static IP on its sole (VFIO-passed) interface before `talosctl` can reach it — no DHCP on these point-to-point links.
-1. **Preferred:** static IP via Talos machine config (`talosctl gen config --config-patch` setting `.machine.network.interfaces[].addresses`, `dhcp: false`, matched to the interface's MAC — the *physical* NIC's MAC, since this is true passthrough).
-2. **Fallback:** dracut-style `ip=` kernel cmdline via `virt-install --extra-args` (less reliable off ISO boot — check current Talos support).
+**Networking prerequisite:** each VM needs a stable IP on its sole (VFIO-passed) interface before `talosctl` can reach it. Addressing is handled by DHCP with a per-MAC static reservation, served from `r5500` (§1.2) — `r5500` is the only machine with actual L2 presence on both point-to-point links (both physical ports on `r9600` are VFIO-passed straight into the VMs, so `r9600` itself has none).
 
-**Target config:** VM1 `10.10.0.2/30` gw `10.10.0.1`; VM2 `10.10.1.2/30` gw `10.10.1.1`.
+**Kernel module prerequisite:** Talos ships `ixgbe` (confirmed present in the squashfs, correct PCI alias for `0x1563`, all three module dependencies present) but only as a loadable module (`CONFIG_IXGBE=m`) — Talos does not auto-probe it the way it does built-in drivers, so the X550 never becomes a network device on a stock boot (`Interface: (none)` in the maintenance-mode TUI, confirmed both on v1.14.1 and v1.13.10). It needs `.machine.kernel.modules: [{name: ixgbe}]` delivered before any network exists, which has the same chicken-and-egg problem as addressing did — solved the same way: `talos.config=metal-iso` baked into the installer's kernel cmdline ([`talos/scripts/build-installer-iso.sh`](talos/scripts/build-installer-iso.sh)), reading the directive from a filesystem-labeled `metal-iso` volume ([`talos/scripts/build-node-config-iso.sh`](talos/scripts/build-node-config-iso.sh), patch: [`talos/patches/kernel-modules.yaml`](talos/patches/kernel-modules.yaml)) at boot, no network required. Unlike addressing, this directive is identical for every VM, so one config volume is shared across all of them rather than built per-node.
+
+**Target config:** `control-plane` `10.10.0.2/30` gw `10.10.0.1`; `worker` `10.10.1.2/30` gw `10.10.1.1`.
 
 **Bootstrap sequencing:**
-1. VMs boot with static IPs.
-2. `r5500` routes VM1 ↔ VM2 traffic via plain kernel forwarding (already active, §1.2) — sufficient for etcd/control-plane formation.
+1. VMs boot, DHCP their reserved `/30` addresses from `r5500`.
+2. `r5500` routes `control-plane` ↔ `worker` traffic via plain kernel forwarding (already active, §1.2) — sufficient for etcd/control-plane formation.
 3. BIRD on `r5500` advertises the two `/30`s to `r9600` over BGP → `r9600`'s kernel FIB gets routes to both VMs.
 4. Run `talosctl` from `r9600` — reachable via the BGP-learned routes, no separate management network.
-5. Standard Talos bootstrap: apply machine configs, `talosctl bootstrap`, wait for etcd quorum (2-node caveat: etcd wants odd quorum — confirm whether 2 control-plane nodes is acceptable or a 3rd/witness node is needed).
+5. Standard Talos bootstrap: apply machine configs, `talosctl bootstrap`, wait for etcd quorum — trivial with a single control-plane node, no witness/3rd node needed.
 
 **Note:** control-plane traffic (etcd, kube-apiserver, kubelet registration) rides the same `/30`-routed path throughout — decoupled from XDP development risk by design.
 
@@ -248,3 +259,5 @@ docker run --rm --name bird-bgp \
 - **systemd-networkd on `r5500`** after a split-brain with NetworkManager; NetworkManager remains on `r9600` (not causing conflicts there).
 - **BIRD runs as a container** (`ghcr.io/cybozu/bird`), not a host package, on both hosts — pins the exact version identically across rebuilds; `--network host` + `NET_ADMIN` gives it the same kernel-FIB access a host install would have (§1.3).
 - **BIRD's config/unit files live in-repo** (`bird/`), applied via one hostname-keyed script (`bird/scripts/bird-ctl.sh setup|destroy|status`) rather than manual per-machine `docker run`/systemd edits.
+- **VM addressing via DHCP + per-MAC static reservation** (`dnsmasq` on `r5500`), not config baked into VM boot media — keeps install ISOs stock/swappable across distros; `r5500` is the only host with L2 presence on both links.
+- **`ixgbe` kernel module delivered via `metal-iso`**, not left to Talos's own auto-probing — verified Talos doesn't load it without this on either v1.14.1 or v1.13.10, despite the module, its dependencies, and the correct PCI alias all being present in the image. Independent of and orthogonal to the DHCP-addressing decision above — this is about the driver existing at all, not about IP assignment.
