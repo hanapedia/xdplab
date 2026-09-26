@@ -1,0 +1,14 @@
+[Unit]
+Description=xdplab domestic0/domestic1 test targets (veth wiring, L3 routed)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/xdplab/clab/domestic/domestic-ctl.sh apply
+ExecStop=/opt/xdplab/clab/domestic/domestic-ctl.sh teardown
+
+[Install]
+WantedBy=multi-user.target

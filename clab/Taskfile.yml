@@ -21,8 +21,39 @@ includes:
 vars:
   HOSTNAME:
     sh: hostname
+  R5500_HOST:
+    sh: echo "${R5500_HOST:-r5500}"
+  R5500_DEPLOY_DIR:
+    sh: echo "${R5500_DEPLOY_DIR:-/opt/xdplab}"
 
 tasks:
+  # --- r5500 deploy plumbing (domestic0/domestic1 only -- bird/dnsmasq are
+  # the underlay's, synced by ../Taskfile.yml's own r5500:sync; regmirror is
+  # vm/'s, synced by vm/Taskfile.yml's own r5500:sync) -------------------
+  r5500:sync:
+    desc: Rsync domestic/ to {{.R5500_HOST}}:{{.R5500_DEPLOY_DIR}}/clab/domestic
+    run: once
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo mkdir -p {{.R5500_DEPLOY_DIR}}/clab/domestic && sudo chown -R "$(id -un):$(id -gn)" {{.R5500_DEPLOY_DIR}}/clab'
+      - rsync -az --delete -e ssh domestic/ {{.R5500_HOST}}:{{.R5500_DEPLOY_DIR}}/clab/domestic/
+
+  # --- domestic0/domestic1 test targets (r5500 only) -----------------------
+  domestic:setup:
+    desc: Sync + set up domestic0/domestic1 test targets on r5500, over SSH from here
+    deps: [r5500:sync]
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/clab/domestic/domestic-ctl.sh setup'
+
+  domestic:destroy:
+    desc: Tear down domestic0/domestic1 on r5500, over SSH from here
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/clab/domestic/domestic-ctl.sh destroy'
+
+  domestic:status:
+    desc: Show domestic0/domestic1 status on r5500, over SSH from here
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/clab/domestic/domestic-ctl.sh status'
+
   build-images:
     desc: Build the mover and BIRD sidecar images
     cmds:

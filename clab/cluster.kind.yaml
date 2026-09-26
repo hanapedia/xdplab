@@ -4,4 +4,19 @@ networking:
   disableDefaultCNI: true
 nodes:
   - role: control-plane
+    kubeadmConfigPatches:
+    - |
+      kind: InitConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-ip: "10.10.0.2"
+        taints: []
+      localAPIEndpoint:
+        advertiseAddress: "10.10.0.2"
   - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-ip: "10.10.1.2"
