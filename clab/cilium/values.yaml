@@ -6,10 +6,10 @@ cgroup:
   autoMount:
     enabled: false
   hostRoot: /sys/fs/cgroup
-# eth1 is the renamed physical XDP-link port inside each node's netns
+# node0 is the renamed physical XDP-link port inside each node's netns
 # (../DESIGN.md "Giving nodes real NICs") -- not kind's default docker-bridge
 # interface, which stays untouched for control-plane traffic.
-devices: "eth1"
+devices: "node0"
 enableIPv4Masquerade: false
 ipam:
   operator:
@@ -20,6 +20,6 @@ k8sServicePort: 6443
 kubeProxyReplacement: true
 l7Proxy: false
 nodePort:
-  directRoutingDevice: "eth1"
+  directRoutingDevice: "node0"
   enabled: true
 routingMode: "native"

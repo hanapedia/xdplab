@@ -7,7 +7,7 @@ set -eu
 
 PORT="${1:?usage: move.sh <port> <target-container> [<netns-iface-name>]}"
 TARGET="${2:?usage: move.sh <port> <target-container> [<netns-iface-name>]}"
-IFACE="${3:-eth1}"
+IFACE="${3:-node0}"
 
 ip link set "$PORT" up
 dhclient -1 "$PORT"

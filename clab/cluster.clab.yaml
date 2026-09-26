@@ -24,8 +24,8 @@ topology:
       stages:
         configure:
           exec:
-            - command: sh /move.sh enp4s0f0 xdplab-control-plane
-            - command: sh /move.sh enp4s0f1 xdplab-worker
+            - command: sh /move.sh enp4s0f0 xdplab-control-plane node0
+            - command: sh /move.sh enp4s0f1 xdplab-worker node0
     control-plane:
       network-mode: container:xdplab-control-plane
       kind: linux
@@ -36,7 +36,7 @@ topology:
         create:
           wait-for:
             - node: mover
-              stage: configure   # eth1 must actually be in place before bird starts, not just "creation started"
+              stage: configure   # node0 must actually be in place before bird starts, not just "creation started"
     worker:
       network-mode: container:xdplab-worker
       kind: linux
