@@ -1,0 +1,67 @@
+# https://taskfile.dev
+# Adapted from mooring/e2e_v2/Taskfile.yaml's install-mooring/-crds tasks and
+# network/mooring/natconfig.yaml. Unlike coil/cilium, mooring's own operator
+# and agent images aren't built here -- assumed already present locally under
+# the default tags below (built from the mooring repo itself), just loaded
+# into kind. Assumes a kind cluster named {{.KIND_CLUSTER}} already exists
+# (../DESIGN.md) with Coil or Cilium already installed (mooring rides on top
+# of whichever CNI is running, same as the reference).
+version: '3'
+
+vars:
+  KIND_CLUSTER: '{{.KIND_CLUSTER | default "xdplab"}}'
+  OPERATOR_IMAGE: '{{.OPERATOR_IMAGE | default "ghcr.io/hanapedia/mooring-operator"}}'
+  OPERATOR_TAG: '{{.OPERATOR_TAG | default "dev"}}'
+  AGENT_IMAGE: '{{.AGENT_IMAGE | default "ghcr.io/hanapedia/mooring-agent"}}'
+  AGENT_TAG: '{{.AGENT_TAG | default "dev"}}'
+
+tasks:
+  install:
+    desc: Load the mooring operator/agent images, install mooring, and wait for readiness
+    cmds:
+      - task: load-image
+      - task: apply
+      - task: wait
+
+  load-image:
+    desc: Load the (already-built, locally-present) operator and agent images into kind
+    cmds:
+      - kind load docker-image {{.OPERATOR_IMAGE}}:{{.OPERATOR_TAG}} --name {{.KIND_CLUSTER}}
+      - kind load docker-image {{.AGENT_IMAGE}}:{{.AGENT_TAG}} --name {{.KIND_CLUSTER}}
+
+  apply:
+    desc: Apply mooring CRDs, operator, agent, and the domestic1 NATConfig
+    cmds:
+      - kubectl apply -f manifests/crds/
+      - |
+        yq '
+          (select(.kind == "Deployment")
+          .spec.template.spec.containers[]
+          | select(.name == "operator")
+          .image) = "{{.OPERATOR_IMAGE}}:{{.OPERATOR_TAG}}"
+        ' manifests/operator.yaml | kubectl apply -f -
+      - |
+        yq '
+          (select(.kind == "DaemonSet")
+          .spec.template.spec.containers[]
+          | select(.name == "agent")
+          .image) = "{{.AGENT_IMAGE}}:{{.AGENT_TAG}}"
+        ' manifests/agent.yaml | kubectl apply -f -
+      - kubectl apply -f natconfig.yaml
+
+  wait:
+    desc: Wait for the mooring operator and agent to become ready
+    cmds:
+      - kubectl wait -n mooring-system --for=condition=available --timeout=300s deployment/mooring-operator
+      - kubectl wait -n mooring-system --for=condition=ready --timeout=300s pod --selector=app=mooring-agent
+
+  exec:
+    desc: 'Run moorctl CMD on every mooring agent pod. Usage: task mooring:exec CMD="unload"'
+    vars:
+      CMD: '{{.CMD | default ""}}'
+    cmds:
+      - |
+        kubectl get pods -n mooring-system -l app=mooring-agent -o name | while read pod; do
+          echo "=== $pod ==="
+          kubectl exec -n mooring-system "$pod" -c agent -- moorctl {{.CMD}}
+        done

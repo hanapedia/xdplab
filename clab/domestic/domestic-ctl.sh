@@ -12,6 +12,10 @@ set -euo pipefail
 DOMESTIC0=(domestic0 192.168.0.101   192.168.0.100/24  ghcr.io/cybozu/ubuntu-debug:24.04)
 DOMESTIC1=(domestic1 192.168.10.101  192.168.10.100/24 ghcr.io/cybozu/testhttpd:0)
 
+# Only this address may reach either target -- the planned NAT/egress-gateway
+# source, not a pod's own address or the local subnet itself.
+ALLOWED_SRC="10.70.0.1/32"
+
 UNIT_NAME="xdplab-domestic.service"
 UNIT_PATH="/etc/systemd/system/${UNIT_NAME}"
 DOMESTIC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +60,17 @@ apply_one() {
     docker exec --user root "$container" ip route replace default via "$gw" dev eth0
     echo "==> $container: eth0 $ip via $gw (routed, host end $veth_h $gw/24)"
   fi
+
+  # Only $ALLOWED_SRC (the NAT/egress-gateway address) may reach this target
+  # -- anything else (a pod's own address, a spoofed source, traffic routed
+  # in from elsewhere) gets dropped before the container ever sees it.
+  # DOCKER-USER, not FORWARD directly: dockerd owns FORWARD's own rules and
+  # reserves this chain specifically for rules that survive its own chain
+  # management (re-inserted on every docker/dockerd restart).
+  iptables -C DOCKER-USER -o "$veth_h" -s "$ALLOWED_SRC" -j ACCEPT 2>/dev/null \
+    || iptables -I DOCKER-USER 1 -o "$veth_h" -s "$ALLOWED_SRC" -j ACCEPT
+  iptables -C DOCKER-USER -o "$veth_h" -j DROP 2>/dev/null \
+    || iptables -A DOCKER-USER -o "$veth_h" -j DROP
 }
 
 teardown_one() {
@@ -69,6 +84,8 @@ teardown_one() {
   # apply that created the veth but never got as far as moving its peer in.
   docker rm -f "$container" >/dev/null 2>&1 || true
   ip link show "$veth_h" &>/dev/null && ip link del "$veth_h"
+  iptables -D DOCKER-USER -o "$veth_h" -s "$ALLOWED_SRC" -j ACCEPT 2>/dev/null || true
+  iptables -D DOCKER-USER -o "$veth_h" -j DROP 2>/dev/null || true
   echo "==> torn down $name"
 }
 
@@ -79,6 +96,8 @@ status_one() {
   echo "--- $name ---"
   ip -brief link show "$veth_h" 2>/dev/null || echo "$veth_h: absent"
   docker exec --user root "$container" ip -4 addr show eth0 2>/dev/null || echo "$container: absent or unaddressed"
+  iptables -C DOCKER-USER -o "$veth_h" -j DROP 2>/dev/null && echo "firewall: source-restricted to $ALLOWED_SRC" \
+    || echo "firewall: rule absent"
 }
 
 cmd_apply() {

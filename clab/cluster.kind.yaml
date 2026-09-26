@@ -20,3 +20,5 @@ nodes:
       nodeRegistration:
         kubeletExtraArgs:
           node-ip: "10.10.1.2"
+    labels:
+      mooring.hanapeida.link/advertise: "true"

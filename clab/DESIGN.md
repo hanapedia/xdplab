@@ -23,7 +23,7 @@ kind's own control-plane traffic (etcd, API server, kubelet↔apiserver) stays o
 
 Two fixed nodes with fixed addresses — no templating layer (`.tmpl` + generator task) needed for the topology file itself; a static `cluster.clab.yaml` is simpler and sufficient here. (Contrast with `vm/talos/terraform`, which *does* template — Talos configs are large, secret-bearing, generated documents, a different scale of problem than a handful of static container definitions.)
 
-`cluster.kind.yaml` carries kubeadm patches (`kubeletExtraArgs.node-ip`, `localAPIEndpoint.advertiseAddress`) so each node's Kubernetes-visible address is its physical XDP-link address (`10.10.0.2`/`10.10.1.2`) rather than kind's docker-bridge address — same pattern `mooring/e2e_v2`'s `network/cluster.kind.yaml` uses. The address doesn't exist on `eth1` yet at the moment kubelet first reads this (`mover`'s move happens concurrently, not strictly before), but kubelet tolerates that and picks it up once the interface appears. `taints: []` on the control-plane's `InitConfiguration` drops the default `node-role.kubernetes.io/control-plane:NoSchedule` taint, so both nodes are schedulable — only two nodes total, no dedicated control-plane capacity to protect.
+`cluster.kind.yaml` carries kubeadm patches (`kubeletExtraArgs.node-ip`, `localAPIEndpoint.advertiseAddress`) so each node's Kubernetes-visible address is its physical XDP-link address (`10.10.0.2`/`10.10.1.2`) rather than kind's docker-bridge address — same pattern `mooring/e2e_v2`'s `network/cluster.kind.yaml` uses. The address doesn't exist on `node0` yet at the moment kubelet first reads this (`mover`'s move happens concurrently, not strictly before), but kubelet tolerates that and picks it up once the interface appears. `taints: []` on the control-plane's `InitConfiguration` drops the default `node-role.kubernetes.io/control-plane:NoSchedule` taint, so both nodes are schedulable — only two nodes total, no dedicated control-plane capacity to protect.
 
 ## Giving nodes real NICs
 
@@ -43,10 +43,10 @@ GW=$(ip route show dev <port> | awk '/default/ {print $3}')
 
 PID=$(docker inspect -f '{{.State.Pid}}' <node-container>)
 ip link set <port> netns $PID          # address is flushed by the move
-docker exec <node-container> ip link set <port> name eth1
-docker exec <node-container> ip addr add "$ADDR" dev eth1   # re-apply the lease we already learned
-docker exec <node-container> ip link set eth1 up             # must come before the route below, or it fails
-docker exec <node-container> ip route replace default via "$GW" dev eth1
+docker exec <node-container> ip link set <port> name node0
+docker exec <node-container> ip addr add "$ADDR" dev node0   # re-apply the lease we already learned
+docker exec <node-container> ip link set node0 up             # must come before the route below, or it fails
+docker exec <node-container> ip route replace default via "$GW" dev node0
 ```
 
 Keeps `dnsmasq`'s existing per-MAC reservations on `r5500` completely unchanged — the physical MAC doing the DHCP request is the same either way, whether that request comes from the host or a container.
@@ -68,7 +68,7 @@ control-plane:
     create:
       wait-for:
         - node: mover
-          stage: configure   # eth1 must actually be in place before bird starts
+          stage: configure   # node0 must actually be in place before bird starts
 ```
 
 `mover`'s own NIC-move commands live under `stages.configure.exec` rather than the plain top-level `exec:` for exactly this reason — top-level `exec:` isn't tied to a named stage another node can `wait-for`, only per-stage `exec` is.
@@ -79,14 +79,20 @@ This is exactly what [`bird/conf/r5500.conf`](../bird/conf/r5500.conf) already a
 protocol bgp 'control-plane' {   # quoted -- BIRD doesn't allow hyphens in bare identifiers
   local as 64513;
   neighbor 10.10.0.2 as 64514;
-  ipv4 { import all; export filter { if net ~ [ 10.10.0.0/30, 10.10.1.0/30 ] then accept; reject; }; };
+  direct;
+  passive;
+  ipv4 { import all; export all; };
 }
 protocol bgp 'k8s-worker' {   # not `worker` -- collides with a BIRD 3.x reserved symbol even quoted (mooring/e2e_v2 hits the same thing)
   local as 64513;
   neighbor 10.10.1.2 as 64515;
-  ipv4 { import all; export filter { if net ~ [ 10.10.0.0/30, 10.10.1.0/30 ] then accept; reject; }; };
+  direct;
+  passive;
+  ipv4 { import all; export all; };
 }
 ```
+
+`export all;` here means each kind node learns the *other* node's pod CIDR back through `r5500`, not just the two link `/30`s -- necessary since the two kind nodes have no direct link to each other, only point-to-point links to `r5500`. A node doesn't re-import its own route reflected back to it: standard eBGP AS-path loop prevention, no explicit filter needed since each node has its own ASN. `r5500`'s next hop for a reflected route (originally received with the *other* node's own address as `bgp_next_hop`, unreachable from the far side) gets automatically substituted with `r5500`'s own address on the receiving side's link -- BIRD does this without an explicit `next hop self` for a `direct` eBGP session whose received next hop isn't in the local interface's subnet.
 
 Each node's own config is the mirror image:
 
@@ -94,18 +100,20 @@ Each node's own config is the mirror image:
 # control-plane
 router id 10.10.0.2;
 protocol bgp r5500 {
-  local as 64514;
+  local 10.10.0.2 as 64514;
   neighbor 10.10.0.1 as 64513;
-  ipv4 { import all; export all; };
+  direct;
+  ipv4 { import all; export all; next hop self; };
 }
 ```
 ```
 # worker
 router id 10.10.1.2;
 protocol bgp r5500 {
-  local as 64515;
+  local 10.10.1.2 as 64515;
   neighbor 10.10.1.1 as 64513;
-  ipv4 { import all; export all; };
+  direct;
+  ipv4 { import all; export all; next hop self; };
 }
 ```
 
@@ -116,10 +124,11 @@ Static per-node files (`bird/control-plane.conf`, `bird/worker.conf`), same as `
 - A physical port can belong to only one namespace at a time, so there is one port per node container.
 - A node container restart destroys its netns, which falls the port back to the host namespace same as the teardown case above — the move (and DHCP) script has to run again afterward, not only at initial deploy.
 - `r5500`'s BIRD can get stuck reporting `Idle, Error: Link down` for the `control-plane`/`k8s-worker` sessions even once the link is genuinely back up (`LOWER_UP` confirmed on both ends) — a stale device-scan state, not a real link problem. `sudo systemctl restart bird-bgp.service` on `r5500` clears it; restarting the kind-side BIRD sidecars alone doesn't (the stale state is on `r5500`'s side).
+- A `bird.conf` edit on `r9600`/`r5500` needs `task bird:reload` (or `task bird:reload:r9600`/`:r5500` individually), not just a file sync: both `bird-ctl.sh setup`'s `enable --now` (a no-op if already active) and `birdc configure` inside the running container re-read the container's own bind-mounted view of the file, which stays pinned to the old inode once rsync replaces it (write-new-then-rename) -- only a full container restart re-resolves the bind mount against the current file.
 
 ## CNI: Coil and Cilium
 
-Both, not a single final choice — same two options `mooring/e2e_v2` already exercises, with its install tasks imported and adapted (kind cluster name, `eth1` as the physical-link device, fresh ASNs): [`coil/Taskfile.yaml`](coil/Taskfile.yaml), [`cilium/Taskfile.yaml`](cilium/Taskfile.yaml), wired into [`Taskfile.yml`](Taskfile.yml) (`task coil:install`, `task cilium:install`). Both integration points live in the per-node BIRD config itself ([`bird/control-plane.conf`](bird/control-plane.conf), [`bird/worker.conf`](bird/worker.conf)), ported from `mooring/e2e_v2`'s node configs minus their `gateway recursive` + custom next-hop import filter on the outward session — that exists to resolve next-hops through their shared-L2/single-AS ToR fabric; our `r5500` session is genuine eBGP over a directly-connected `/30`, so a plain eBGP next-hop already resolves correctly with no extra help. Neither Coil nor Cilium talks BGP to `r5500` directly — both hand pod-route advertisement to BIRD instead, via different mechanisms:
+Both, not a single final choice — same two options `mooring/e2e_v2` already exercises, with its install tasks imported and adapted (kind cluster name, `node0` as the physical-link device, fresh ASNs): [`coil/Taskfile.yaml`](coil/Taskfile.yaml), [`cilium/Taskfile.yaml`](cilium/Taskfile.yaml), wired into [`Taskfile.yml`](Taskfile.yml) (`task coil:install`, `task cilium:install`). Both integration points live in the per-node BIRD config itself ([`bird/control-plane.conf`](bird/control-plane.conf), [`bird/worker.conf`](bird/worker.conf)), ported from `mooring/e2e_v2`'s node configs minus their `gateway recursive` + custom next-hop import filter on the outward session — that exists to resolve next-hops through their shared-L2/single-AS ToR fabric, which a plain point-to-point `/30` doesn't need. The outward `r5500` session does still carry `local`/`direct`/`next hop self` (mooring's loopback-sourced route needs its next hop rewritten; Coil/Cilium's routes already have a legitimate one, so this is a no-op for them). Neither Coil nor Cilium talks BGP to `r5500` directly — both hand pod-route advertisement to BIRD instead, via different mechanisms:
 
 - **Coil** doesn't speak BGP at all — `coild` programs pod routes straight into Linux kernel table `119` itself (plus its own `ip rule` making that table authoritative for pod traffic, the same "dedicated kernel table + rule" shape already used for `r9600`'s own FIB, [`../DESIGN.md`](../DESIGN.md) §1.3). BIRD picks those routes up read-only with `protocol kernel 'coil' { kernel table 119; learn; ... }`, merges them into its main table via a `protocol pipe`, and they ride out through BIRD's existing `r5500` session (`export all;`, unfiltered — same as `mooring/e2e_v2`'s outward session).
 - **Cilium** runs its own BGP speaker and peers with BIRD over loopback (`127.0.0.1`) — a second, local-only BGP session distinct from BIRD's outward one to `r5500`, on its own ASN pair (`64516` Cilium / `64517` BIRD) so it can't collide with the real per-node ASNs (`64514`/`64515`) or `r5500`'s (`64513`). Cluster-wide `CiliumBGPClusterConfig`, no node selector — unlike `mooring/e2e_v2`'s rack-labeled subset, both of xdplab's nodes need it.
@@ -127,7 +136,21 @@ Both, not a single final choice — same two options `mooring/e2e_v2` already ex
 
 ## `domestic0`/`domestic1` test targets (`r5500`)
 
-Same role and addressing as `mooring/e2e_v2`'s `domestic0`/`domestic1` (`network/cluster.clab.yaml.tmpl`) — pod-reachable "external" endpoints to test egress/BGP-advertised-route correctness against, without spinning up throwaway pods each time. `r5500` *is* the router here (unlike the reference, where a separate `router0` node fills that role), so these are plain docker containers on `r5500` itself: [`domestic/domestic-ctl.sh`](domestic/domestic-ctl.sh) wires each one to `r5500` with a direct point-to-point veth pair (`--network none`, manually addressed — same shape as `move.sh`, avoiding Docker's own bridge/NAT), plain L3 routing rather than a bridge — each subnet only ever has this one container on it, so there's no L2 segment worth switching. `domestic0` (`ghcr.io/cybozu/ubuntu-debug:24.04`, `192.168.0.100/24`) is a generic client target; `domestic1` (`ghcr.io/cybozu/testhttpd:0`, `192.168.10.100/24`) serves HTTP. `r5500` holds `.101` on each veth's host end — no BGP advertisement needed for `r5500` to reach them, they're directly connected. Installed via `task domestic:setup`/`task domestic:destroy` (`clab/Taskfile.yml`, rsynced to `r5500` the same way as `bird/`/`dnsmasq/`), persisted across reboots by [`xdplab-domestic.service`](domestic/xdplab-domestic.service) (oneshot, same pattern as `vm/DESIGN.md`'s `vfio-bind-x550.service`).
+Same role and addressing as `mooring/e2e_v2`'s `domestic0`/`domestic1` (`network/cluster.clab.yaml.tmpl`) — "external" endpoints to test egress/BGP-advertised-route correctness against, without spinning up throwaway pods each time. `r5500` *is* the router here (unlike the reference, where a separate `router0` node fills that role), so these are plain docker containers on `r5500` itself: [`domestic/domestic-ctl.sh`](domestic/domestic-ctl.sh) wires each one to `r5500` with a direct point-to-point veth pair (`--network none`, manually addressed — same shape as `move.sh`, avoiding Docker's own bridge/NAT), plain L3 routing rather than a bridge — each subnet only ever has this one container on it, so there's no L2 segment worth switching. `domestic0` (`ghcr.io/cybozu/ubuntu-debug:24.04`, `192.168.0.100/24`) is a generic client target; `domestic1` (`ghcr.io/cybozu/testhttpd:0`, `192.168.10.100/24`) serves HTTP. `r5500` holds `.101` on each veth's host end — no BGP advertisement needed for `r5500` to reach them, they're directly connected. Installed via `task domestic:setup`/`task domestic:destroy` (`clab/Taskfile.yml`, rsynced to `r5500` the same way as `bird/`/`dnsmasq/`), persisted across reboots by [`xdplab-domestic.service`](domestic/xdplab-domestic.service) (oneshot, same pattern as `vm/DESIGN.md`'s `vfio-bind-x550.service`).
+
+Each target only accepts forwarded traffic sourced from `10.70.0.1/32` (`domestic-ctl.sh`'s `ALLOWED_SRC`) — the mooring-managed NAT/egress-gateway address below — via a per-target ACCEPT/DROP pair on Docker's `DOCKER-USER` chain (matched on the target's host-side veth as `-o`). Anything else routed in, including pod traffic sourced from the pod CIDR, is dropped before it reaches the container; this only affects forwarded traffic, so `r5500`'s own locally-originated traffic to either target (via `OUTPUT`, not `FORWARD`) is unaffected.
+
+## Mooring egress NAT gateway
+
+[`hanapedia/mooring`](https://github.com/hanapedia/mooring) — an XDP-based SNAT/reverse-NAT egress gateway — installed and wired in the same shape as `mooring/e2e_v2`'s own `install-mooring` task: [`mooring/Taskfile.yaml`](mooring/Taskfile.yaml) (`task mooring:install`), CRDs and manifests copied from `mooring/manifests/` (`crds/`, `operator.yaml`, `agent.yaml`). Runs on top of whichever CNI (Coil or Cilium) is already installed — install that first. Unlike Coil/Cilium's own Taskfiles, mooring's operator/agent images aren't built here: `mooring:install` assumes `ghcr.io/hanapedia/mooring-operator:dev`/`ghcr.io/hanapedia/mooring-agent:dev` already exist locally (built from the `mooring` repo directly) and only `kind load docker-image`s them in.
+
+`mooring-agent` runs as a DaemonSet on every node (`NODE_IFACE=node0`) and, like Cilium, speaks BGP to the local BIRD over loopback rather than to `r5500` directly — a third passive session (`protocol bgp mooring`, ASN pair `64518` agent / `64519` BIRD, on `127.0.0.2` this time, not `127.0.0.1`) in [`bird/control-plane.conf`](bird/control-plane.conf)/[`bird/worker.conf`](bird/worker.conf), community-tagged and excluded from the local kernel export the same way Coil/Cilium are. `xdplab-worker` carries the `mooring.hanapeida.link/advertise: "true"` node label (`cluster.kind.yaml`); mooring only advertises the NAT external IP from a node carrying that label.
+
+[`mooring/natconfig.yaml`](mooring/natconfig.yaml) is the one `NATConfig` in use: pods labeled `app: domestic1-client` get SNATed to `10.70.0.1/32` for traffic toward `192.168.0.0/24`/`192.168.10.0/24` (`domestic0`/`domestic1`'s subnets) — matching `domestic-ctl.sh`'s `ALLOWED_SRC` exactly, so only mooring-SNATed traffic can reach either target. [`mooring/sample/`](mooring/sample/) has two `domestic1-client` pods, one per node (`task sample:apply`) — `xdplab-worker`'s is the fast path (client and NAT gateway co-located), `xdplab-control-plane`'s is the slow path (cross-node). `task mooring:exec CMD=...` runs `moorctl` on every agent pod.
+
+Perf tasks (`clab/Taskfile.yml`, ported from `mooring/e2e_v2`'s `perf-*` tasks) drive `iperf3` between the sample pods and `domestic0`: `task perf:mooring` runs the full fast/slow, big/small-packet sweep (`task perf:server-start`/`perf:server-stop` control `domestic0`'s `iperf3 -s`, over SSH since `domestic0` lives on `r5500` rather than alongside the kind cluster like the reference's own `domestic0`).
+
+The mooring-learned route (`10.70.0.1/32`, sourced from the agent's loopback with no real path to it) relies on the outward `r5500` session's `local`/`direct`/`next hop self` (above) to get a usable next hop -- without it, BIRD derives a self-referential one that `r5500` rejects (`Invalid NEXT_HOP attribute`). No per-route filter override is needed beyond that. Confirmed reaching `r5500` and both kind nodes correctly.
 
 ## Future work
 

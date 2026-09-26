@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: domestic1-client-xdplab-control-plane
+  labels:
+    app: domestic1-client
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: xdplab-control-plane
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: domestic1-client-xdplab-worker
+  labels:
+    app: domestic1-client
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: xdplab-worker
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
