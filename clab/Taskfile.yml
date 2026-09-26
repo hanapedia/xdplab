@@ -100,6 +100,38 @@ tasks:
       - kubectl apply -k mooring/sample/
       - kubectl wait pod -l app=domestic1-client -n default --for=condition=Ready --timeout=300s
 
+  # --- quick connectivity check ---------------------------------------------
+  connectivity:test:
+    desc: From each sample pod, ping the other sample pod (cross-node) and domestic0/domestic1 (via mooring SNAT)
+    silent: true
+    cmds:
+      - |
+        set -u
+        WORKER_POD=domestic1-client-xdplab-worker
+        CP_POD=domestic1-client-xdplab-control-plane
+        WORKER_IP=$(kubectl get pod "$WORKER_POD" -o jsonpath='{.status.podIP}')
+        CP_IP=$(kubectl get pod "$CP_POD" -o jsonpath='{.status.podIP}')
+
+        rc=0
+        check() {
+          local from="$1" target="$2" label="$3"
+          if kubectl exec "$from" -- ping -c2 -W1 "$target" >/dev/null 2>&1; then
+            echo "OK   $from -> $label ($target)"
+          else
+            echo "FAIL $from -> $label ($target)"
+            rc=1
+          fi
+        }
+
+        check "$WORKER_POD" "$CP_IP" "$CP_POD (cross-node)"
+        check "$WORKER_POD" 192.168.0.100 "domestic0"
+        check "$WORKER_POD" 192.168.10.100 "domestic1"
+        check "$CP_POD" "$WORKER_IP" "$WORKER_POD (cross-node)"
+        check "$CP_POD" 192.168.0.100 "domestic0"
+        check "$CP_POD" 192.168.10.100 "domestic1"
+
+        exit $rc
+
   # --- perf tests (mooring/e2e_v2's perf-* tasks) ---------------------------
   # domestic0 (iperf3 server) is a plain docker container on r5500, not local
   # to this host -- unlike the reference, where domestic0 is a containerlab
