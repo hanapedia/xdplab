@@ -53,11 +53,34 @@ tasks:
       - sudo bird/scripts/bird-ctl.sh status
       - sudo bird/scripts/fib-ctl.sh status
 
+  bird:reload:r9600:
+    desc: Restart BIRD on r9600 to pick up a config change (run this ON r9600)
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - sudo bird/scripts/bird-ctl.sh reload
+
   bird:setup:r5500:
     desc: Sync + set up BIRD on r5500, over SSH from here
     deps: [r5500:sync]
     cmds:
       - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/bird/scripts/bird-ctl.sh setup'
+
+  bird:reload:r5500:
+    desc: Sync + restart BIRD on r5500 to pick up a config change, over SSH from here
+    deps: [r5500:sync]
+    cmds:
+      - ssh {{.R5500_HOST}} 'sudo {{.R5500_DEPLOY_DIR}}/bird/scripts/bird-ctl.sh reload'
+
+  bird:reload:
+    desc: Sync + restart BIRD on both r9600 and r5500 to pick up config changes (run this ON r9600)
+    preconditions:
+      - sh: '[ "{{.HOSTNAME}}" = "r9600" ]'
+        msg: 'must run on r9600 (current host: {{.HOSTNAME}})'
+    cmds:
+      - task: bird:reload:r9600
+      - task: bird:reload:r5500
 
   bird:destroy:r5500:
     desc: Tear down BIRD on r5500, over SSH from here

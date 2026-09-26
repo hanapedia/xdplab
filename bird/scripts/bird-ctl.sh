@@ -49,6 +49,18 @@ cmd_setup() {
   systemctl --no-pager status "${UNIT_NAME}"
 }
 
+cmd_reload() {
+  require_root
+  # `enable --now` on an already-active unit is a no-op -- and the running
+  # container's bind mount was resolved against the config file's inode at
+  # its last start, so a plain `birdc configure` inside it just re-reads
+  # that same stale inode if the file's been rsynced (replaced, not edited
+  # in place) since. An explicit restart re-resolves the bind mount against
+  # the current file.
+  systemctl restart "${UNIT_NAME}"
+  systemctl --no-pager status "${UNIT_NAME}"
+}
+
 cmd_destroy() {
   require_root
   systemctl disable --now "${UNIT_NAME}" 2>/dev/null || true
@@ -68,10 +80,11 @@ cmd_status() {
 
 case "${1:-}" in
   setup) cmd_setup ;;
+  reload) cmd_reload ;;
   destroy) cmd_destroy ;;
   status) cmd_status ;;
   *)
-    echo "usage: $0 {setup|destroy|status}" >&2
+    echo "usage: $0 {setup|reload|destroy|status}" >&2
     exit 1
     ;;
 esac
